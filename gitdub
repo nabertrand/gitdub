@@ -1,4 +1,30 @@
 #!/usr/bin/env ruby
+#
+# This is a hacked up version of gitdub.  Original gitdub source can be found
+# at https://github.com/mavam/gitdub.  This version uses the post-receive-email
+# script that comes in the git distribution instead of git-notifier:
+# https://github.com/git/git/blob/master/contrib/hooks/post-receive-email
+#
+# It understands/uses some, but not all of the configuration YAML file that a
+# stock gitdub uses.  The keys it does understand are:
+#
+# gitdub.directory
+# gitdub.bind
+# gitdub.port
+# gitdub.ssl.*
+# gitdub.allowed_sources
+# gitdub.monitor
+# notifier.to
+# notifier.from
+# notifier.subject
+# github.id
+# github.protocol
+# github.to
+# github.from
+# github.subject
+# github.uri
+#
+# Butchery conducted by Dave Goodell <dgoodell@cisco.com>
 
 require 'fileutils'
 require 'json'
@@ -7,34 +33,9 @@ require 'sinatra/base'
 require 'yaml'
 
 class GitNotifier
-  STATE_FILE = '.git-notifier.dat'
-
-  private
-
-  MAPPINGS = {
-    'from' => 'sender',
-    'to' => 'mailinglist',
-    'subject' => 'emailprefix',
-    'uri' => 'repouri'
-  }
-
   public
 
   def self.run(path, opts)
-    args = Hash[opts.map { |k, v| [MAPPINGS[k] || k, v] }]
-    success = execute(path, args)
-    $logger.error('git-notifier failed') unless success
-    success
-  end
-
-  private
-
-  def self.execute(path, args = [])
-    args = args.map do |k, v|
-      v = v * ',' if k == 'mailinglist'
-      next unless v
-      ["--#{k}"] + (!!v == v ? [] : ["#{v}"]) # Ignore non-boolean values.
-    end
     current = Dir.pwd()
     success = true
     Dir.chdir(path)
@@ -42,14 +43,26 @@ class GitNotifier
       $logger.debug('> git fetch origin +refs/heads/*:refs/heads/*')
       success = system('git', 'fetch', 'origin', '+refs/heads/*:refs/heads/*')
       raise "git fetch failed in #{path}" unless success
-      args = args.flatten.delete_if { |x| x.nil? }
-      $logger.debug("> git-notifier #{args}")
-      success = system('git-notifier', *args)
+
+      # Now invoke the post-receive hook to actually send the mail.  Most of
+      # the configuration about who mail should be sent to, who it should come
+      # from, etc. is controlled by git-config options in this repository.
+      IO.popen('post-receive-email', 'r+') { |io|
+        oldrev = opts['before']
+        newrev = opts['after']
+        refname = opts['refname']
+        $logger.debug("oldrev=#{oldrev} newrev=#{newrev} refname=#{refname}")
+        io.puts("#{oldrev} #{newrev} #{refname}")
+        io.close_write
+      }
+
       raise "git-notifier failed in #{path} with args: #{args}" unless success
     rescue Exception => e
       $logger.error(e)
     end
     Dir.chdir(current)
+
+    $logger.error('git-notifier failed') unless success
     success
   end
 end
@@ -79,6 +92,10 @@ class GitDub
     opts['from'] = "#{push['pusher']['name']} <#{push['pusher']['email']}>"
     $logger.info("received push from #{user}/#{repo} for commits "\
                  "#{push['before'][0..5]}...#{push['after'][0..5]}")
+
+    opts['before'] = push['before']
+    opts['after'] = push['after']
+    opts['refname'] = push['ref']
 
     @github.each do |entry|
       if "#{user}\/#{repo}" =~ Regexp.new(entry['id'])
@@ -112,10 +129,23 @@ class GitDub
           end
         end
 
-        state_file = File.join(dir, GitNotifier::STATE_FILE)
-        if @silent_init and not File.exists?(state_file)
-          $logger.info("configuring git-notifer for silent update")
-          opts['updateonly'] = true unless File.exists?(state_file)
+        # update the git-config values that post-receive-email uses
+        Dir.chdir(dir) do
+          cfg = {
+            'hooks.envelopesender' => opts['from'],
+            'hooks.mailinglist' => opts['to'].join(','),
+            'hooks.emailprefix' => opts['subject'],
+            'hooks.showrev' => "t=%s; printf '#{url}/commit/%%s' \$t; echo;echo; git show -C \$t; echo;echo",
+            'hooks.emailmaxlines' => '5000',
+            'hooks.diffopts' => '--stat --summary --find-copies-harder',
+          }
+          cfg.each { |k,v|
+            $logger.debug("#{user}/#{repo}: setting #{k} = #{v}")
+            if not system('git', 'config', '--local', k, v)
+              $logger.error("failed to set git config '#{k}' for #{user}/#{repo}")
+            end
+          }
+          system("echo '#{user}/#{repo}' > description")
         end
 
         return GitNotifier.run(dir, opts)
@@ -146,21 +176,9 @@ class GitDubServer < Sinatra::Base
     if not params[:payload]
       $logger.error('received POST request with empty payload')
     else
-      json = JSON.parse(params[:payload])
-      if not json
-        $log.error('received invalid JSON:')
-        STDERR.puts(params[:payload])
-      else
-        STDERR.puts(JSON.pretty_generate(json)) if settings.debug_post
-        # Ideally we'd use the X-Github-Event header to distinguish a ping from
-        # an ordinary push. However, the 'headers' variable in Sinatra only
-        # contains Content-Type, so we introspect the JSON instead.
-        if json['zen']
-          $logger.debug('got ping from github')
-        else
-          settings.gitdub.process(json)
-        end
-      end
+      # see this page for docs on JSON msg contents:
+      # https://developer.github.com/v3/activity/events/types/#pushevent
+      settings.gitdub.process(JSON.parse(params[:payload]))
     end
   end
 end
@@ -177,7 +195,6 @@ def run(config)
   GitDubServer.set(:gitdub, GitDub.new(config))
   GitDubServer.set(:bind, config['gitdub']['bind'])
   GitDubServer.set(:port, config['gitdub']['port'])
-  GitDubServer.set(:debug_post, config['gitdub']['debug'])
   GitDubServer.set(:allowed_sources, config['gitdub']['allowed_sources'])
 
   if not config['gitdub']['ssl']['enable']
@@ -234,8 +251,6 @@ if __FILE__ == $0
         $logger.info("re-reading configuration file")
         config = YAML.load_file(file)
         GitDubServer.set(:gitdub, GitDub.new(config))
-        GitDubServer.set(:debug_post, config['gitdub']['debug'])
-        GitDubServer.set(:allowed_sources, config['gitdub']['allowed_sources'])
         break if config['gitdub']['monitor'] == 0
       end
 
