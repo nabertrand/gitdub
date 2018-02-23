@@ -59,6 +59,7 @@ class GitDub
     @notifier = config['notifier']
     @github = config['github']
     @silent_init = config['gitdub']['silent_init']
+    @default_protocol = config['gitdub']['default_protocol'] || 'git'
 
     dir = config['gitdub']['directory']
     if dir != '.'
@@ -82,14 +83,14 @@ class GitDub
         opts.merge!(entry.reject { |k, v| k == 'id' || k == 'protocol'})
         opts['uri'] ||= url
 
-        entry['protocol'] ||= 'git'
+        entry['protocol'] ||= @default_protocol
         remote = case entry['protocol']
                  when /git/
-                   "git://github.com/#{user}/#{repo}.git"
+                   push['repository']['git_url']
                  when /ssh/
-                   "git@github.com:#{user}/#{repo}.git"
+                   push['repository']['ssh_url']
                  when /https/
-                   "https://github.com/#{user}/#{repo}.git"
+                   push['repository']['clone_url']
                  else
                    $logger.error("invalid protocol: #{entry['protocol']}")
                    next
@@ -187,7 +188,7 @@ def run(config)
     key = File.open(config['gitdub']['ssl']['key']).read
     webrick_options = {
       app:            GitDubServer,
-      BindAddress:    config['gitdub']['bind'],
+      Host:           config['gitdub']['bind'],
       Port:           config['gitdub']['port'],
       Logger:         $logger,
       SSLEnable:      true,
