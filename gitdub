@@ -74,7 +74,9 @@ class GitDub
     url = push['repository']['url']
     user = push['repository']['owner']['name']
     repo = push['repository']['name']
-    opts['link'] = "#{url}/compare/#{push['before']}...#{push['after']}"
+    opts['link'] = push['compare']
+    opts['subject'] = "[gitdub #{push['repository']['full_name']}]"
+    opts['from'] = "#{push['pusher']['name']} <#{push['pusher']['email']}>"
     $logger.info("received push from #{user}/#{repo} for commits "\
                  "#{push['before'][0..5]}...#{push['after'][0..5]}")
 
