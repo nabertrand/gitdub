@@ -56,13 +56,13 @@ class GitNotifier
         io.close_write
       }
 
-      raise "git-notifier failed in #{path} with args: #{args}" unless success
+      raise "post-receive-email failed in #{path} with args: #{args}" unless success
     rescue Exception => e
       $logger.error(e)
     end
     Dir.chdir(current)
 
-    $logger.error('git-notifier failed') unless success
+    $logger.error('post-receive-email failed') unless success
     success
   end
 end
@@ -227,8 +227,8 @@ if __FILE__ == $0
       "[#{time}] #{severity}#{' ' * (5 - severity.size + 1)}gitdub | #{msg}\n"
   end
 
-  unless which('git-notifier')
-    $logger.error('could not find git-notifier in $PATH')
+  unless which('post-receive-email')
+    $logger.error('could not find post-receive-email in $PATH')
     exit 1
   end
 
